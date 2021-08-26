@@ -17,7 +17,7 @@ It must returns an instance of :class:`Backbone`.
 """
 
 
-def build_backbone(cfg, input_shape=None):
+def build_backbone(cfg, input_shape=None, backbone_name=None):
     """
     Build a backbone from `cfg.MODEL.BACKBONE.NAME`.
 
@@ -27,7 +27,10 @@ def build_backbone(cfg, input_shape=None):
     if input_shape is None:
         input_shape = ShapeSpec(channels=len(cfg.MODEL.PIXEL_MEAN))
 
-    backbone_name = cfg.MODEL.BACKBONE.NAME
+    # Check for a custom built backbone name
+    if backbone_name is None:
+        backbone_name = cfg.MODEL.BACKBONE.NAME
+
     backbone = BACKBONE_REGISTRY.get(backbone_name)(cfg, input_shape)
     assert isinstance(backbone, Backbone)
     return backbone
