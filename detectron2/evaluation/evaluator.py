@@ -98,7 +98,7 @@ class DatasetEvaluators(DatasetEvaluator):
         return results
 
 
-def inference_on_dataset(model, data_loader, evaluator):
+def inference_on_dataset(model, data_loader, evaluator, last_idx=None):
     """
     Run model on the data_loader and evaluate the metrics with evaluator.
     Also benchmark the inference speed of `model.forward` accurately.
@@ -156,6 +156,9 @@ def inference_on_dataset(model, data_loader, evaluator):
                     ),
                     n=5,
                 )
+
+            if last_idx is not None and idx > last_idx:
+                break
 
     # Measure the time only for this worker (before the synchronization barrier)
     total_time = time.perf_counter() - start_time

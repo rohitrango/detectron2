@@ -5,6 +5,7 @@ from collections import defaultdict
 from typing import Optional
 import torch
 from torch.utils.data.sampler import Sampler
+import numpy as np
 
 from detectron2.utils import comm
 
@@ -178,7 +179,7 @@ class InferenceSampler(Sampler):
     this sampler produces different number of samples on different workers.
     """
 
-    def __init__(self, size: int):
+    def __init__(self, size: int, shuffle: bool = False):
         """
         Args:
             size (int): the total number of data of the underlying dataset to sample from
@@ -192,6 +193,10 @@ class InferenceSampler(Sampler):
         begin = shard_size * self._rank
         end = min(shard_size * (self._rank + 1), self._size)
         self._local_indices = range(begin, end)
+        if shuffle:
+            self._local_indices = np.random.permutation(self._local_indices)
+            self._local_indices = list(self._local_indices)
+
 
     def __iter__(self):
         yield from self._local_indices

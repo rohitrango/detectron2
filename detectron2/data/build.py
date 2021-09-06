@@ -353,7 +353,7 @@ def build_detection_train_loader(cfg, mapper=None):
     )
 
 
-def build_detection_test_loader(cfg, dataset_name, mapper=None):
+def build_detection_test_loader(cfg, dataset_name, mapper=None, shuffle=False):
     """
     Similar to `build_detection_train_loader`.
     But this function uses the given `dataset_name` argument (instead of the names in cfg),
@@ -385,7 +385,7 @@ def build_detection_test_loader(cfg, dataset_name, mapper=None):
         mapper = DatasetMapper(cfg, False)
     dataset = MapDataset(dataset, mapper)
 
-    sampler = InferenceSampler(len(dataset))
+    sampler = InferenceSampler(len(dataset), shuffle=shuffle)
     # Always use 1 image per worker during inference since this is the
     # standard when reporting inference time in papers.
     batch_sampler = torch.utils.data.sampler.BatchSampler(sampler, 1, drop_last=False)
