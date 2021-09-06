@@ -332,7 +332,9 @@ class BasicStem(CNNBlockBase):
     The standard ResNet stem (layers before the first residual block).
     """
 
-    def __init__(self, in_channels=3, out_channels=64, norm="BN"):
+    def __init__(self, in_channels=3, out_channels=64, norm="BN",
+            init_downsample=True, init_maxpool=True
+    ):
         """
         Args:
             norm (str or callable): norm after the first conv layer.
@@ -340,11 +342,13 @@ class BasicStem(CNNBlockBase):
         """
         super().__init__(in_channels, out_channels, 4)
         self.in_channels = in_channels
+        stride = 2 if init_downsample else 1
+        self.init_maxpool = init_maxpool        # Do we want to apply maxpool here?
         self.conv1 = Conv2d(
             in_channels,
             out_channels,
             kernel_size=7,
-            stride=2,
+            stride=stride,
             padding=3,
             bias=False,
             norm=get_norm(norm, out_channels),
@@ -354,7 +358,8 @@ class BasicStem(CNNBlockBase):
     def forward(self, x):
         x = self.conv1(x)
         x = F.relu_(x)
-        x = F.max_pool2d(x, kernel_size=3, stride=2, padding=1)
+        if self.init_maxpool:
+            x = F.max_pool2d(x, kernel_size=3, stride=2, padding=1)
         return x
 
 
@@ -534,10 +539,16 @@ def build_resnet_backbone(cfg, input_shape):
     """
     # need registration of new blocks/stems?
     norm = cfg.MODEL.RESNETS.NORM
+    # Use extra parameters for initial downsampling
+    init_downsample = cfg.MODEL.RESNETS.INIT_DOWNSAMPLE
+    init_maxpool = cfg.MODEL.RESNETS.INIT_MAXPOOL
+    
     stem = BasicStem(
         in_channels=input_shape.channels,
         out_channels=cfg.MODEL.RESNETS.STEM_OUT_CHANNELS,
         norm=norm,
+        init_downsample=init_downsample,
+        init_maxpool=init_maxpool,
     )
 
     # fmt: off

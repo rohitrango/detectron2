@@ -461,6 +461,10 @@ _C.MODEL.RESNETS = CN()
 _C.MODEL.RESNETS.DEPTH = 50
 _C.MODEL.RESNETS.OUT_FEATURES = ["res4"]  # res4 for C4 backbone, res2..5 for FPN backbone
 
+# Parameters to prevent initial downsampling
+_C.MODEL.RESNETS.INIT_DOWNSAMPLE = True
+_C.MODEL.RESNETS.INIT_MAXPOOL = True
+
 # Number of groups to use; 1 ==> ResNet; > 1 ==> ResNeXt
 _C.MODEL.RESNETS.NUM_GROUPS = 1
 
