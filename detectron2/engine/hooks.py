@@ -4,6 +4,7 @@
 import datetime
 import itertools
 import logging
+from math import log
 import os
 import tempfile
 import time
@@ -336,7 +337,12 @@ class EvalHook(HookBase):
                         "[EvalHook] eval_function should return a nested dict of float. "
                         "Got '{}: {}' instead.".format(k, v)
                     )
+            #logging.getLogger(__name__).warn("Putting scalars here......")
             self.trainer.storage.put_scalars(**flattened_results, smoothing_hint=False)
+            #print(self.trainer.storage._iter)
+            #print(self.trainer.storage._latest_scalars)
+            #input()
+
 
         # Evaluation may take different time among workers.
         # A barrier make them start the next iteration together.

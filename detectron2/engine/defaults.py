@@ -358,6 +358,28 @@ class DefaultTrainer(SimpleTrainer):
             # run writers in the end, so that evaluation metrics are written
             ret.append(hooks.PeriodicWriter(self.build_writers(), period=20))
         return ret
+    
+
+    def rearrange_hooks(self,):
+        ''' Simple hack to swap the last two hooks (we want the writer LAST) '''
+        #if not isinstance(self._hooks[-1], hooks.PeriodicWriter):
+            #self._hooks[-2], self._hooks[-1] = self._hooks[-1], self._hooks[-2]
+        periodic_idx = []
+        for i in range(len(self._hooks)):
+            if isinstance(self._hooks[i], hooks.PeriodicWriter):
+                periodic_idx.append(i)
+        new_hooks = []
+        # Put all non-writers first
+        for i in range(len(self._hooks)):
+            if i in periodic_idx:
+                continue
+            new_hooks.append(self._hooks[i])
+        # Append all the writers at the end
+        for i in periodic_idx:
+            new_hooks.append(self._hooks[i])
+        # Re-assign
+        self._hooks = new_hooks
+
 
     def build_writers(self):
         """
