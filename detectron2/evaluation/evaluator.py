@@ -123,6 +123,11 @@ def inference_on_dataset(model, data_loader, evaluator, last_idx=None):
     logger.info("Start inference on {} images".format(len(data_loader)))
 
     total = len(data_loader)  # inference data loader must have a fixed length
+
+    # If we specified a last index, keep total as min of both
+    if last_idx is not None:
+        total = min(total, last_idx)
+
     if evaluator is None:
         # create a no-op evaluator
         evaluator = DatasetEvaluators([])
@@ -131,6 +136,7 @@ def inference_on_dataset(model, data_loader, evaluator, last_idx=None):
     num_warmup = min(5, total - 1)
     start_time = time.perf_counter()
     total_compute_time = 0
+
     with inference_context(model), torch.no_grad():
         for idx, inputs in enumerate(data_loader):
             if idx == num_warmup:
@@ -157,7 +163,7 @@ def inference_on_dataset(model, data_loader, evaluator, last_idx=None):
                     n=5,
                 )
 
-            if last_idx is not None and idx > last_idx:
+            if last_idx is not None and idx >= last_idx:
                 break
 
     # Measure the time only for this worker (before the synchronization barrier)
