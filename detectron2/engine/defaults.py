@@ -469,7 +469,7 @@ class DefaultTrainer(SimpleTrainer):
         return build_detection_train_loader(cfg)
 
     @classmethod
-    def build_test_loader(cls, cfg, dataset_name, shuffle=False):
+    def build_test_loader(cls, cfg, dataset_name, shuffle=False, last_idx=None):
         """
         Returns:
             iterable
@@ -477,7 +477,7 @@ class DefaultTrainer(SimpleTrainer):
         It now calls :func:`detectron2.data.build_detection_test_loader`.
         Overwrite it if you'd like a different data loader.
         """
-        return build_detection_test_loader(cfg, dataset_name, shuffle=shuffle)
+        return build_detection_test_loader(cfg, dataset_name, shuffle=shuffle, last_idx=last_idx)
 
     @classmethod
     def build_evaluator(cls, cfg, dataset_name):
@@ -518,7 +518,7 @@ Alternatively, you can call evaluation functions yourself (see Colab balloon tut
 
         results = OrderedDict()
         for idx, dataset_name in enumerate(cfg.DATASETS.TEST):
-            data_loader = cls.build_test_loader(cfg, dataset_name, shuffle=last_idx is not None)
+            data_loader = cls.build_test_loader(cfg, dataset_name, shuffle=last_idx is not None, last_idx=last_idx)
             # When evaluators are passed in as arguments,
             # implicitly assume that evaluators can be created before data_loader.
             if evaluators is not None:
@@ -533,7 +533,7 @@ Alternatively, you can call evaluation functions yourself (see Colab balloon tut
                     )
                     results[dataset_name] = {}
                     continue
-            results_i = inference_on_dataset(model, data_loader, evaluator, last_idx=last_idx)
+            results_i = inference_on_dataset(model, data_loader, evaluator, last_idx=None)
             results[dataset_name] = results_i
             if comm.is_main_process():
                 assert isinstance(

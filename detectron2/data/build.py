@@ -353,11 +353,13 @@ def build_detection_train_loader(cfg, mapper=None):
     )
 
 
-def build_detection_test_loader(cfg, dataset_name, mapper=None, shuffle=False):
+def build_detection_test_loader(cfg, dataset_name, mapper=None, shuffle=False, last_idx=None):
     """
     Similar to `build_detection_train_loader`.
     But this function uses the given `dataset_name` argument (instead of the names in cfg),
     and uses batch size 1.
+
+    `last_idx` tells the maximum size of this dataset
 
     Args:
         cfg: a detectron2 CfgNode
@@ -385,7 +387,12 @@ def build_detection_test_loader(cfg, dataset_name, mapper=None, shuffle=False):
         mapper = DatasetMapper(cfg, False)
     dataset = MapDataset(dataset, mapper)
 
-    sampler = InferenceSampler(len(dataset), shuffle=shuffle)
+    # If we have specified a last index, then just use that instead
+    if last_idx is None:
+        sampler = InferenceSampler(len(dataset), shuffle=shuffle)
+    else:
+        sampler = InferenceSampler(min(len(dataset), last_idx), shuffle=shuffle)
+
     # Always use 1 image per worker during inference since this is the
     # standard when reporting inference time in papers.
     batch_sampler = torch.utils.data.sampler.BatchSampler(sampler, 1, drop_last=False)
