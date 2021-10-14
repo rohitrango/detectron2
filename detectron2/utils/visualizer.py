@@ -380,10 +380,10 @@ class Visualizer:
             colors = [
                 self._jitter([x / 255 for x in self.metadata.thing_colors[c]]) for c in classes
             ]
-            alpha = 0.8
+            alpha = 0.2
         else:
             colors = None
-            alpha = 0.5
+            alpha = 0.2
 
         if self._instance_mode == ColorMode.IMAGE_BW:
             self.output.img = self._create_grayscale_image(
