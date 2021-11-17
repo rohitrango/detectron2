@@ -24,7 +24,7 @@ from detectron2.structures import Boxes, BoxMode, pairwise_iou
 from detectron2.utils.logger import create_small_table
 from .coco_evaluation import instances_to_coco_json 
 from pycocotools import mask as maskUtils
-
+from .f_boundary import db_eval_boundary
 from .evaluator import DatasetEvaluator
 
 
@@ -202,7 +202,7 @@ class TPMQScoreEvaluator(DatasetEvaluator):
 
         # Final metric
         # metrics = ["F1-all", "F1-0.5", "F1-0.75", "F1-small", "F1-medium", "F1-large"]
-        metrics = ['TPMQ (IoU=0.5)']
+        metrics = ['TPMQ(IoU=0.5)']
 
         gt_masks = coco_eval._gts
         dt_masks = coco_eval._dts
@@ -249,7 +249,13 @@ class TPMQScoreEvaluator(DatasetEvaluator):
                         continue
                     for gtm in gt_mask:
                       if gtm['id'] == dtm: 
-                        iou_calc = maskUtils.iou([dt_mask[dtid]['segmentation']], [gtm['segmentation']] ,[0])[0][0]
+                        # iou_calc = maskUtils.iou([dt_mask[dtid]['segmentation']], [gtm['segmentation']] ,[0])[0][0]
+                        # print(dt_mask[dtid]['segmentation'])
+                        # import pdb
+                        # pdb.set_trace()
+                        gt_bin_mask = maskUtils.decode(gtm['segmentation'])
+                        dt_bin_mask = maskUtils.decode(dt_mask[dtid]['segmentation'])
+                        iou_calc = db_eval_boundary(dt_bin_mask, gt_bin_mask, bound_th=1.0)
                         # if iou_calc > 0.5:
                         iou_perimg += iou_calc
                         cnt +=1

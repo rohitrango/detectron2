@@ -615,10 +615,11 @@ class Visualizer:
 
         # Display in largest to smallest order to reduce occlusion.
         areas = None
-        if boxes is not None:
-            areas = np.prod(boxes[:, 2:] - boxes[:, :2], axis=1)
-        elif masks is not None:
-            areas = np.asarray([x.area() for x in masks])
+        # if boxes is not None:
+        #     areas = np.prod(boxes[:, 2:] - boxes[:, :2], axis=1)
+        # elif masks is not None:
+        #     areas = np.asarray([x.area() for x in masks])
+        areas = np.asarray([x.area() for x in masks])
 
         if areas is not None:
             sorted_idxs = np.argsort(-areas).tolist()
@@ -629,7 +630,15 @@ class Visualizer:
             assigned_colors = [assigned_colors[idx] for idx in sorted_idxs]
             keypoints = keypoints[sorted_idxs] if keypoints is not None else None
 
+        # ignore_cls = ['blood', 'nonsegmented', 'scissor']
+        # plot_cls = ['person']
         for i in range(num_instances):
+            # ignore certain labels
+            #if any([x in labels[i].lower() for x in ignore_cls]):
+                #continue
+            # if not any([x in labels[i].lower() for x in plot_cls]):
+            #     continue
+
             color = assigned_colors[i]
             if boxes is not None:
                 self.draw_box(boxes[i], edge_color=color)
@@ -665,10 +674,11 @@ class Visualizer:
                         text_pos = (x0, y1)
 
                 height_ratio = (y1 - y0) / np.sqrt(self.output.height * self.output.width)
-                lighter_color = self._change_color_brightness(color, brightness_factor=0.7)
+                #lighter_color = self._change_color_brightness(color, brightness_factor=0.7)
+                lighter_color = color
                 font_size = (
                     np.clip((height_ratio - 0.02) / 0.08 + 1, 1.2, 2)
-                    * 0.5
+                    * 0.75
                     * self._default_font_size
                 )
                 self.draw_text(
