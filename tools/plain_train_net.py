@@ -41,6 +41,7 @@ from detectron2.evaluation import (
     COCOPanopticEvaluator,
     DatasetEvaluators,
     LVISEvaluator,
+    NamingErrorEvaluator,
     PascalVOCDetectionEvaluator,
     SemSegEvaluator,
     inference_on_dataset,

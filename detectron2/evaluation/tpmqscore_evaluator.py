@@ -217,8 +217,6 @@ class TPMQScoreEvaluator(DatasetEvaluator):
         cnt_imgs = 0
         # Calculate precision recall for each class, area, and iou threshold
         for evalImg in coco_eval.evalImgs:
-
-
             # Skip if maxDets is not the best value, or if evalImg is None (there was no detection)
             if evalImg is None:
                 continue
@@ -333,7 +331,7 @@ class TPMQScoreEvaluator(DatasetEvaluator):
             results[k] = np.around(np.mean(v), 4)
 
         # Final dict of results
-        results = {f'TPMQ-{k}': v for k, v in results.items()}
+        results = {f'TPMQ_{k}': v for k, v in results.items()}
         self._logger.info(
             "Evaluation results for {}: \n".format('TPMQ-score') + create_small_table(results)
         )

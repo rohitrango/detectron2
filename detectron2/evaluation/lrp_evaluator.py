@@ -13,23 +13,20 @@ import pycocotools.mask as mask_util
 import torch
 from fvcore.common.file_io import PathManager
 from pycocotools.coco import COCO
-# from boundary_iou.coco_instance_api.coco import COCO
 from tabulate import tabulate
 
 import detectron2.utils.comm as comm
 from detectron2.data import MetadataCatalog
 from detectron2.data.datasets.coco import convert_to_coco_json
+#from detectron2.evaluation.fast_eval_api import COCOeval_opt as COCOeval
 from pycocotools.cocoeval import COCOeval
-# from detectron2.evaluation.fast_eval_api import COCOeval_opt as COCOeval
-# from boundary_iou.coco_instance_api.cocoeval import COCOeval
-
 from detectron2.structures import Boxes, BoxMode, pairwise_iou
 from detectron2.utils.logger import create_small_table
 
 from .evaluator import DatasetEvaluator
 
 
-class COCOEvaluator(DatasetEvaluator):
+class LRPEvaluator(DatasetEvaluator):
     """
     Evaluate AR for object proposals, AP for instance detection/segmentation, AP
     for keypoint detection outputs using COCO's metrics.
@@ -136,7 +133,7 @@ class COCOEvaluator(DatasetEvaluator):
             predictions = self._predictions
 
         if len(predictions) == 0:
-            self._logger.warning("[COCOEvaluator] Did not receive valid predictions.")
+            self._logger.warning("[LRPEvaluator] Did not receive valid predictions.")
             return {}
 
         if self._output_dir:
@@ -146,8 +143,6 @@ class COCOEvaluator(DatasetEvaluator):
                 torch.save(predictions, f)
 
         self._results = OrderedDict()
-        if "proposals" in predictions[0]:
-            self._eval_box_proposals(predictions)
         if "instances" in predictions[0]:
             self._eval_predictions(set(self._tasks), predictions)
         # Copy so the caller can do whatever with results
@@ -195,50 +190,12 @@ class COCOEvaluator(DatasetEvaluator):
                 if len(coco_results) > 0
                 else None  # cocoapi does not handle empty results very well
             )
-
+            if task != 'segm':
+                continue
             res = self._derive_coco_results(
                 coco_eval, task, class_names=self._metadata.get("thing_classes")
             )
-            self._results[task] = res
-
-    def _eval_box_proposals(self, predictions):
-        """
-        Evaluate the box proposals in predictions.
-        Fill self._results with the metrics for "box_proposals" task.
-        """
-        if self._output_dir:
-            # Saving generated box proposals to file.
-            # Predicted box_proposals are in XYXY_ABS mode.
-            bbox_mode = BoxMode.XYXY_ABS.value
-            ids, boxes, objectness_logits = [], [], []
-            for prediction in predictions:
-                ids.append(prediction["image_id"])
-                boxes.append(prediction["proposals"].proposal_boxes.tensor.numpy())
-                objectness_logits.append(prediction["proposals"].objectness_logits.numpy())
-
-            proposal_data = {
-                "boxes": boxes,
-                "objectness_logits": objectness_logits,
-                "ids": ids,
-                "bbox_mode": bbox_mode,
-            }
-            with PathManager.open(os.path.join(self._output_dir, "box_proposals.pkl"), "wb") as f:
-                pickle.dump(proposal_data, f)
-
-        if not self._do_evaluation:
-            self._logger.info("Annotations are not available for evaluation.")
-            return
-
-        self._logger.info("Evaluating bbox proposals ...")
-        res = {}
-        areas = {"all": "", "small": "s", "medium": "m", "large": "l"}
-        for limit in [100, 1000]:
-            for area, suffix in areas.items():
-                stats = _evaluate_box_proposals(predictions, self._coco_api, area=area, limit=limit)
-                key = "AR{}@{:d}".format(suffix, limit)
-                res[key] = float(stats["ar"].item() * 100)
-        self._logger.info("Proposal metrics: \n" + create_small_table(res))
-        self._results["box_proposals"] = res
+            self._results['lrp-' + task] = res
 
     def _derive_coco_results(self, coco_eval, iou_type, class_names=None):
         """
@@ -255,9 +212,7 @@ class COCOEvaluator(DatasetEvaluator):
         """
 
         metrics = {
-            "bbox": ["AP", "AP50", "AP75", "APs", "APm", "APl"],
-            "segm": ["AP", "AP50", "AP75", "APs", "APm", "APl"],
-            "keypoints": ["AP", "AP50", "AP75", "APm", "APl"],
+            "segm": ['LRP', 'LRP-loc', 'LRP-FP', 'LRP-FN'],
         }[iou_type]
 
         if coco_eval is None:
@@ -265,47 +220,118 @@ class COCOEvaluator(DatasetEvaluator):
             return {metric: float("nan") for metric in metrics}
 
         # the standard metrics
-        results = {
-            metric: float(coco_eval.stats[idx] * 100 if coco_eval.stats[idx] >= 0 else "nan")
-            for idx, metric in enumerate(metrics)
-        }
+        # TODO
+        results = dict()
+
+        # calculate TP, FP, FN, q(gi, dgi), final results for each class
+        tpcalc = dict()
+        fpcalc = dict()
+        fncalc = dict()
+        qcalc = dict()  
+        # per class result (lrp, lrploc, lrpfp, lrpfn)
+        lrp_class, lrp_loc_class, lrp_fp_class, lrp_fn_class = [dict() for _ in range(4)]
+
+        # dict to keep area keys intact
+        area_to_key = [(tuple(area), st) for area, st in zip(coco_eval.params.areaRng,  \
+                                ['all', 'small', 'medium', 'large'])]
+        area_to_key = dict(area_to_key)
+
+        # get all classes
+        all_cats = dict()
+        # Calculate precision recall for each class, area, and iou threshold
+        for evalImg in coco_eval.evalImgs:
+            # Skip if maxDets is not the best value, or if evalImg is None (there was no detection)
+            if evalImg is None:
+                continue
+            if evalImg['maxDet'] != coco_eval.params.maxDets[-1]:
+                continue
+            # Extract detected and ground truths
+            # int, [a1, a2], [TxD], [TxD], [G], [G]
+            # int, [dontcare], [D], [D], [G], [G]   (after taking dt[0] and dtIg[0])
+            cate_class, area, dt, dtIg, gtIds, gtIg = [evalImg[x] for x in ['category_id', 'aRng', 'dtMatches', 'dtIgnore', 'gtIds', 'gtIgnore']]
+            all_cats[cate_class] = 1
+            # get area key
+            areakey = area_to_key[tuple(area)]
+            # ignore if not all areas are considered
+            if areakey != 'all':
+                continue
+            # get image id, and iou matrix
+            ious = evalImg['ious']
+            dt = dt[0]
+            dtIg = dtIg[0]
+            # [G]
+            gtm = evalImg['gtMatches'][0]
+            # Total number of predictions
+            num_gt = len(gtIds) - np.sum(gtIg)
+            # total number of detections
+            #num_dt = dt.shape - sum(dtIg)
+            # There are some detections, see if there are matches and they are not ignored
+            # Compute total true positives and false positives for the image (for each threshold)
+            tp = np.logical_and(                dt , np.logical_not(dtIg) ).sum() * 1.0
+            fp = np.logical_and( np.logical_not(dt), np.logical_not(dtIg) ).sum() * 1.0
+            fn1 = np.logical_and( np.logical_not(gtm), np.logical_not(gtIg)).sum() * 1.0
+            fn = num_gt - tp
+            assert np.abs(fn1 - fn) < 1e-5, 'false negatives do not match, fn = {}, fn1 = {}'.format(fn, fn1)
+            # add to these values
+            tpcalc[cate_class] = tpcalc.get(cate_class, 0) + tp
+            fpcalc[cate_class] = fpcalc.get(cate_class, 0) + fp
+            fncalc[cate_class] = fncalc.get(cate_class, 0) + fn
+            # get pairs of tps
+            tpd_id, tpg_id = [], []
+            for dind, gtid in enumerate(dt):   # dt contains a set of ids of the corresponding gt
+                if dtIg[dind]:
+                    continue
+                # find where gtid is
+                gtind = np.where([x==gtid for x in gtIds])[0]
+                if len(gtind) == 0:
+                    continue
+                gtind = gtind[0]
+                if gtIg[gtind]:
+                    continue
+                tpd_id.append(dind)
+                tpg_id.append(gtind)
+            # append
+            assert np.abs(len(tpd_id) - tp) < 1e-5, 'number of true positives doesnt match with matching, tpds={}, tp={}'.format(len(tpd_id), tp)
+            if tp > 0:
+                neg_iou = (1-ious[tpd_id, tpg_id]).sum()
+                qcalc[cate_class] = qcalc.get(cate_class, 0) + neg_iou
+
+        # per class result (lrp, lrploc, lrpfp, lrpfn)
+        for catid in all_cats.keys():
+            tp = tpcalc.get(catid, 0)
+            fp = fpcalc.get(catid, 0)
+            fn = fncalc.get(catid, 0)
+            Z = tp + fp + fn
+            # skip if theres nothing for this class
+            if Z <= 0:
+                continue
+            q = qcalc.get(catid, 0)   # this 'q' is actually sum_ (1 - q)
+            # calc metrics
+            _lrp = 1.0/Z  * (2 * q + fp + fn)
+            _lrp_loc = 1/tp * q
+            _lrp_fp = fp / (tp + fp)
+            _lrp_fn = fn / (tp + fn)
+            # append to class
+            lrp_class[catid] = _lrp
+            if not np.isnan(_lrp_loc):
+                lrp_loc_class[catid] = _lrp_loc
+            if not np.isnan(_lrp_fp):
+                lrp_fp_class[catid] = _lrp_fp
+            if not np.isnan(_lrp_fn):
+                lrp_fn_class[catid] = _lrp_fn
+            
+        # get final values
+        results['lrp'] = np.around(100 * np.mean(list(lrp_class.values())), 4)
+        results['lrp_loc'] = np.around(100 * np.mean(list(lrp_loc_class.values())), 4)
+        results['lrp_fp'] = np.around(100 * np.mean(list(lrp_fp_class.values())), 4)
+        results['lrp_fn'] = np.around(100 * np.mean(list(lrp_fn_class.values())), 4)
+
         self._logger.info(
-            "Evaluation results for {}: \n".format(iou_type) + create_small_table(results)
+            "Evaluation results for {}: \n".format('LRP-' + iou_type) + create_small_table(results)
         )
         if not np.isfinite(sum(results.values())):
             self._logger.info("Some metrics cannot be computed and is shown as NaN.")
 
-        if class_names is None or len(class_names) <= 1:
-            return results
-        # Compute per-category AP
-        # from https://github.com/facebookresearch/Detectron/blob/a6a835f5b8208c45d0dce217ce9bbda915f44df7/detectron/datasets/json_dataset_evaluator.py#L222-L252 # noqa
-        precisions = coco_eval.eval["precision"]
-        # precision has dims (iou, recall, cls, area range, max dets)
-        assert len(class_names) == precisions.shape[2]
-
-        results_per_category = []
-        for idx, name in enumerate(class_names):
-            # area range index 0: all area ranges
-            # max dets index -1: typically 100 per image
-            precision = precisions[:, :, idx, 0, -1]
-            precision = precision[precision > -1]
-            ap = np.mean(precision) if precision.size else float("nan")
-            results_per_category.append(("{}".format(name), float(ap * 100)))
-
-        # tabulate it
-        N_COLS = min(6, len(results_per_category) * 2)
-        results_flatten = list(itertools.chain(*results_per_category))
-        results_2d = itertools.zip_longest(*[results_flatten[i::N_COLS] for i in range(N_COLS)])
-        table = tabulate(
-            results_2d,
-            tablefmt="pipe",
-            floatfmt=".3f",
-            headers=["category", "AP"] * (N_COLS // 2),
-            numalign="left",
-        )
-        self._logger.info("Per-category {} AP: \n".format(iou_type) + table)
-
-        results.update({"AP-" + name: ap for name, ap in results_per_category})
         return results
 
 
@@ -371,119 +397,6 @@ def instances_to_coco_json(instances, img_id):
     return results
 
 
-# inspired from Detectron:
-# https://github.com/facebookresearch/Detectron/blob/a6a835f5b8208c45d0dce217ce9bbda915f44df7/detectron/datasets/json_dataset_evaluator.py#L255 # noqa
-def _evaluate_box_proposals(dataset_predictions, coco_api, thresholds=None, area="all", limit=None):
-    """
-    Evaluate detection proposal recall metrics. This function is a much
-    faster alternative to the official COCO API recall evaluation code. However,
-    it produces slightly different results.
-    """
-    # Record max overlap value for each gt box
-    # Return vector of overlap values
-    areas = {
-        "all": 0,
-        "small": 1,
-        "medium": 2,
-        "large": 3,
-        "96-128": 4,
-        "128-256": 5,
-        "256-512": 6,
-        "512-inf": 7,
-    }
-    area_ranges = [
-        [0 ** 2, 1e5 ** 2],  # all
-        [0 ** 2, 32 ** 2],  # small
-        [32 ** 2, 96 ** 2],  # medium
-        [96 ** 2, 1e5 ** 2],  # large
-        [96 ** 2, 128 ** 2],  # 96-128
-        [128 ** 2, 256 ** 2],  # 128-256
-        [256 ** 2, 512 ** 2],  # 256-512
-        [512 ** 2, 1e5 ** 2],
-    ]  # 512-inf
-    assert area in areas, "Unknown area range: {}".format(area)
-    area_range = area_ranges[areas[area]]
-    gt_overlaps = []
-    num_pos = 0
-
-    for prediction_dict in dataset_predictions:
-        predictions = prediction_dict["proposals"]
-
-        # sort predictions in descending order
-        # TODO maybe remove this and make it explicit in the documentation
-        inds = predictions.objectness_logits.sort(descending=True)[1]
-        predictions = predictions[inds]
-
-        ann_ids = coco_api.getAnnIds(imgIds=prediction_dict["image_id"])
-        anno = coco_api.loadAnns(ann_ids)
-        gt_boxes = [
-            BoxMode.convert(obj["bbox"], BoxMode.XYWH_ABS, BoxMode.XYXY_ABS)
-            for obj in anno
-            if obj["iscrowd"] == 0
-        ]
-        gt_boxes = torch.as_tensor(gt_boxes).reshape(-1, 4)  # guard against no boxes
-        gt_boxes = Boxes(gt_boxes)
-        gt_areas = torch.as_tensor([obj["area"] for obj in anno if obj["iscrowd"] == 0])
-
-        if len(gt_boxes) == 0 or len(predictions) == 0:
-            continue
-
-        valid_gt_inds = (gt_areas >= area_range[0]) & (gt_areas <= area_range[1])
-        gt_boxes = gt_boxes[valid_gt_inds]
-
-        num_pos += len(gt_boxes)
-
-        if len(gt_boxes) == 0:
-            continue
-
-        if limit is not None and len(predictions) > limit:
-            predictions = predictions[:limit]
-
-        overlaps = pairwise_iou(predictions.proposal_boxes, gt_boxes)
-
-        _gt_overlaps = torch.zeros(len(gt_boxes))
-        for j in range(min(len(predictions), len(gt_boxes))):
-            # find which proposal box maximally covers each gt box
-            # and get the iou amount of coverage for each gt box
-            max_overlaps, argmax_overlaps = overlaps.max(dim=0)
-
-            # find which gt box is 'best' covered (i.e. 'best' = most iou)
-            gt_ovr, gt_ind = max_overlaps.max(dim=0)
-            assert gt_ovr >= 0
-            # find the proposal box that covers the best covered gt box
-            box_ind = argmax_overlaps[gt_ind]
-            # record the iou coverage of this gt box
-            _gt_overlaps[j] = overlaps[box_ind, gt_ind]
-            assert _gt_overlaps[j] == gt_ovr
-            # mark the proposal box and the gt box as used
-            overlaps[box_ind, :] = -1
-            overlaps[:, gt_ind] = -1
-
-        # append recorded iou coverage level
-        gt_overlaps.append(_gt_overlaps)
-    gt_overlaps = (
-        torch.cat(gt_overlaps, dim=0) if len(gt_overlaps) else torch.zeros(0, dtype=torch.float32)
-    )
-    gt_overlaps, _ = torch.sort(gt_overlaps)
-
-    if thresholds is None:
-        step = 0.05
-        thresholds = torch.arange(0.5, 0.95 + 1e-5, step, dtype=torch.float32)
-    recalls = torch.zeros_like(thresholds)
-    # compute recall for each iou threshold
-    for i, t in enumerate(thresholds):
-        recalls[i] = (gt_overlaps >= t).float().sum() / float(num_pos)
-    # ar = 2 * np.trapz(recalls, thresholds)
-    ar = recalls.mean()
-    return {
-        "ar": ar,
-        "recalls": recalls,
-        "thresholds": thresholds,
-        "gt_overlaps": gt_overlaps,
-        "num_pos": num_pos,
-    }
-
-
 def _evaluate_predictions_on_coco(coco_gt, coco_results, iou_type, kpt_oks_sigmas=None):
     """
     Evaluate the coco results using COCOEval API.
@@ -513,7 +426,7 @@ def _evaluate_predictions_on_coco(coco_gt, coco_results, iou_type, kpt_oks_sigma
         num_keypoints_gt = len(next(iter(coco_gt.anns.values()))["keypoints"]) // 3
         num_keypoints_oks = len(coco_eval.params.kpt_oks_sigmas)
         assert num_keypoints_oks == num_keypoints_dt == num_keypoints_gt, (
-            f"[COCOEvaluator] Prediction contain {num_keypoints_dt} keypoints. "
+            f"[LRPEvaluator] Prediction contain {num_keypoints_dt} keypoints. "
             f"Ground truth contains {num_keypoints_gt} keypoints. "
             f"The length of cfg.TEST.KEYPOINT_OKS_SIGMAS is {num_keypoints_oks}. "
             "They have to agree with each other. For meaning of OKS, please refer to "

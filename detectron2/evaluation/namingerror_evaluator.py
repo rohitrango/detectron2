@@ -9,6 +9,7 @@ import os
 import pickle
 from collections import OrderedDict, defaultdict
 import pycocotools.mask as mask_util
+from sklearn.metrics import confusion_matrix
 import torch
 from fvcore.common.file_io import PathManager
 from pycocotools.coco import COCO
@@ -17,8 +18,7 @@ from tabulate import tabulate
 import detectron2.utils.comm as comm
 from detectron2.data import MetadataCatalog
 from detectron2.data.datasets.coco import convert_to_coco_json
-#from detectron2.evaluation.fast_eval_api import COCOeval_opt as COCOeval
-from pycocotools.cocoeval import COCOeval
+from pycocotools.cocoeval import NamingCOCOEval 
 from detectron2.structures import Boxes, BoxMode, pairwise_iou
 from detectron2.utils.logger import create_small_table
 from .coco_evaluation import instances_to_coco_json 
@@ -26,9 +26,9 @@ from .coco_evaluation import instances_to_coco_json
 from .evaluator import DatasetEvaluator
 
 
-class F1ScoreEvaluator(DatasetEvaluator):
+class NamingErrorEvaluator(DatasetEvaluator):
     ''' 
-    This evaluator computes the F1-score of detected images with the set of ground truths
+    This evaluator computes the Naming error
 
     This makes sure that a good detector has a high precision and recall
     This value is computed at different IoU thresholds (to average the effects of segmentation performance)
@@ -82,7 +82,6 @@ class F1ScoreEvaluator(DatasetEvaluator):
         # performed using the COCO evaluation server).
         self._do_evaluation = "annotations" in self._coco_api.dataset
 
-
     def reset(self):
         self._predictions = []
 
@@ -97,7 +96,6 @@ class F1ScoreEvaluator(DatasetEvaluator):
         """
         for input, output in zip(inputs, outputs):
             prediction = {"image_id": input["image_id"]}
-
             if "instances" in output:
                 instances = output["instances"].to(self._cpu_device)
                 prediction["instances"] = instances_to_coco_json(instances, input["image_id"])
@@ -105,11 +103,9 @@ class F1ScoreEvaluator(DatasetEvaluator):
                 prediction["proposals"] = output["proposals"].to(self._cpu_device)
             self._predictions.append(prediction)
 
-
     def evaluate(self):
         # Gather up all the predictions, then we will intercept the matched images from the 
         # `COCOEval` class 
-
         ## Gather up all predictions
         if self._distributed:
             comm.synchronize()
@@ -124,7 +120,6 @@ class F1ScoreEvaluator(DatasetEvaluator):
         if len(predictions) == 0:
             self._logger.warning("[COCOEvaluator] Did not receive valid predictions.")
             return {}
-
         ## Save script is commented because COCO Evaluator already does that
         # if self._output_dir:
         #     PathManager.mkdirs(self._output_dir)
@@ -137,7 +132,6 @@ class F1ScoreEvaluator(DatasetEvaluator):
             self._eval_predictions(set(self._tasks), predictions)
         # Copy so the caller can do whatever with results
         return copy.deepcopy(self._results)
-
 
     def _eval_predictions(self, tasks, predictions):
         """
@@ -174,11 +168,10 @@ class F1ScoreEvaluator(DatasetEvaluator):
                 if len(coco_results) > 0
                 else None  # cocoapi does not handle empty results very well
             )
-
             res = self._derive_coco_results(
                 coco_eval, task, class_names=self._metadata.get("thing_classes")
             )
-            self._results['f1-' + task] = res
+            self._results['ne-' + task] = res
 
 
     def _derive_coco_results(self, coco_eval, iou_type, class_names=None):
@@ -199,110 +192,80 @@ class F1ScoreEvaluator(DatasetEvaluator):
         """
 
         # Final metric
-        metrics = ["F1-all", "F1-0.5", "F1-0.75", "F1-small", "F1-medium", "F1-large"]
+        metrics = ['accuracy']
 
         # Return nans if there are no predictions!
         if coco_eval is None:
             self._logger.warn("No predictions from the model!")
             return {metric: float("nan") for metric in metrics}
         
-        prc_dict = defaultdict(list)
-        rec_dict = defaultdict(list)
         # Calculate precision recall for each class, area, and iou threshold
-        for evalImg in coco_eval.evalImgs:
-            # Skip if maxDets is not the best value, or if evalImg is None (there was no detection)
-            if evalImg is None:
-                continue
-            if evalImg['maxDet'] != coco_eval.params.maxDets[-1]:
-                continue
-            # Extract detected and ground truths
-            # int, [a1, a2], [TxD], [TxD], [G], [G]
-            cate_class, area, dt, dtIg, gtIds, gtIg = [evalImg[x] for x in ['category_id', 'aRng', 'dtMatches', 'dtIgnore', 'gtIds', 'gtIgnore']]
-            # [TxG]
-            gtm = evalImg['gtMatches']
-            gtm = (gtm > 0)
-            # get area
-            area = tuple(area)
-            # Get iou thresholds too 
-            thrs = coco_eval.params.iouThrs
-            # Total number of predictions
-            num_gt = len(gtIds) - np.sum(gtIg)
-            T, D = dt.shape
-            #if D == 0 or num_gt == 0:
-            if num_gt == 0:
-                continue
-                # both dt and gt cannot be 0
-                # No predictions, F1-score is 0
-                for i in range(T):
-                    prc_dict[(cate_class, i, area)].append(0)
-                    rec_dict[(cate_class, i, area)].append(0)
-                continue
-            
-            # There are some detections, see if there are matches and they are not ignored
-            # Compute total true positives and false positives for the image (for each threshold)
-            # Size of tp, fp = [T,]
-            tp = np.logical_and(                dt , np.logical_not(dtIg) ).sum(1) * 1.0
-            fp = np.logical_and( np.logical_not(dt), np.logical_not(dtIg) ).sum(1) * 1.0
-            fn = np.logical_and( np.logical_not(gtm), np.logical_not(gtIg)[np.newaxis, :]).sum(1) * 1.0
-            for i in range(T):
-                prc_dict[(cate_class, i, area)].append(tp[i] / (tp[i] + fp[i] + np.spacing(1)))
-                rec_dict[(cate_class, i, area)].append(tp[i] / (num_gt + np.spacing(1)))
-                # tp[i] + fn[i]
+        CM = confusion_matrix = coco_eval.confusion_matrix      # [dt, gt]
+        tp = np.diag(CM)
+        tpsum = tp.sum()
+        total = CM.sum()
+        eps = np.spacing(2)
 
-        # Initialize f1-scores 
-        f1_scores = defaultdict(list)
-        area_to_key = [(tuple(area), st) for area, st in zip(coco_eval.params.areaRng,  \
-                                ['all', 'small', 'medium', 'large'])]
-        area_to_key = dict(area_to_key)
+        num_gt = CM.sum(0) + eps
+        num_dt = CM.sum(1) + eps
+        pre = tp/num_dt
+        rec = tp/num_gt
+        f1 = 2*pre*rec/(pre + rec + eps)
+        f1 = f1.mean()
 
-        # Calculated the precision and recall for all these images, now calculate the F1-score averaged
-        # over each of these parameters
-        for key in prc_dict.keys():
-            cate_cls, iou_thr, area = key
-            areakey = area_to_key[area]
-            pr = np.array(prc_dict[key])
-            rc = np.array(rec_dict[key])
-            assert len(pr) == len(rc)
-            f1 = 2*pr*rc/(pr + rc + np.spacing(1)) 
-            if len(f1) == 0:
-                continue
-            f1_scores[(iou_thr, areakey)].append(f1.mean())
+        # naming error for dt
+        CM_dt = coco_eval.confusion_matrix_dt
+        tp_dt = np.diag(CM_dt).sum()
+        total_dt = CM_dt.sum()
+
+        tdt = np.diag(CM_dt)
+        gdt = CM_dt.sum(0) + eps
+        ddt = CM_dt.sum(1) + eps
+        pre_dt = tdt / ddt
+        rec_dt = tdt / gdt
+        f1_dt = 2 * pre_dt * rec_dt / (pre_dt + rec_dt + eps)
+        f1_dt = f1_dt.mean()
+        # calculate fpr 
+        fpdt = ddt - tdt
+        fndt = gdt - tdt
+        tndt = total_dt - (tdt + fndt + fpdt)
+        fpr_dt = fpdt / (fpdt + tndt + eps)
+        # calculate fp/gt (a metric that computes #fps per gt for each gt_class)
+        fp_per_cls = CM_dt.sum(0) - tdt
+        gtcount = np.maximum(1, coco_eval.gt_count)
+        fp_per_cls = (fp_per_cls/gtcount).mean()
+
+        results = dict()
+        results['accuracy'] = np.around(100 * tpsum/total, 2)
+        results['naming_error'] = np.around(100 - results['accuracy'], 2)
+        results['naming_f1'] = np.around(100 * f1, 2)
+        # additional result
+        results['accuracy_dt'] = np.around(100 * tp_dt / total_dt, 2)
+        results['naming_error_dt'] = np.around(100 - results['accuracy_dt'], 2)
+        results['naming_f1_dt'] = np.around(100 * f1_dt, 2)
+        results['naming_fpr_dt'] = np.around(100 * fpr_dt.mean(), 2)
+        results['fp_per_cls_dt'] = np.around(fp_per_cls, 2)
+
+        # actual fp / obj 
+        fpcounter = coco_eval.fpcounter
+        fpcount = defaultdict(lambda: [])   # for each class, keep list of fps detected
+        for (_, _, gtCls), v in fpcounter.items():
+            fpcount[gtCls].append(v)
         
-        # Compute average F1score for given iou threshold and area
-        for key, val in f1_scores.items():
-            f1_scores[key] = np.mean(val)
+        for k, v in fpcount.items():
+            fpcount[k] = np.mean(v)
         
-        # Calculate individual f1-scores
-        results = {
-            'all': [],
-            '0.5': [],
-            '0.75': [],
-            'small': [],   # small, med, large f1 at all thresholds
-            'medium': [],
-            'large':[]
-        }
-        for key, f1_mean in f1_scores.items():
-            iou_thr, areakey = key
-            results[areakey].append(f1_mean)
-            if areakey == 'all':
-                iou_thr = coco_eval.params.iouThrs[iou_thr]
-                if str(iou_thr) in ['0.5', '0.75']:
-                    results[str(iou_thr)].append(f1_mean)
+        fp_per_obj = np.mean(list(fpcount.values()))
+        results['fp_per_obj_dt'] = np.around(fp_per_obj, 2)
 
-        # Average these quantities
-        for k, v in results.items():
-            results[k] = np.around(np.mean(v), 4)
-
-        # Final dict of results
-        results = {f'F1_{k}': v for k, v in results.items()}
+        # # Final dict of results
         self._logger.info(
-            "Evaluation results for {}: \n".format('F1-score') + create_small_table(results)
+            "Evaluation results for {}: \n".format('Naming Error') + create_small_table(results)
         )
         if not np.isfinite(sum(results.values())):
             self._logger.info("Some metrics cannot be computed and is shown as NaN.")
 
         return results
-
 
 
 def _evaluate_predictions_on_coco(coco_gt, coco_results, iou_type, kpt_oks_sigmas=None):
@@ -324,7 +287,7 @@ def _evaluate_predictions_on_coco(coco_gt, coco_results, iou_type, kpt_oks_sigma
         raise ValueError(f"iou_type {iou_type} not supported")
 
     coco_dt = coco_gt.loadRes(coco_results)
-    coco_eval = COCOeval(coco_gt, coco_dt, iou_type)
+    coco_eval = NamingCOCOEval(coco_gt, coco_dt, iou_type)
 
     coco_eval.evaluate()
 

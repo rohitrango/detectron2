@@ -21,12 +21,12 @@ from detectron2.data.datasets.coco import convert_to_coco_json
 from pycocotools.cocoeval import COCOeval
 from detectron2.structures import Boxes, BoxMode, pairwise_iou
 from detectron2.utils.logger import create_small_table
-from .coco_evaluation import instances_to_coco_json 
+from detectron2.evaluation.coco_evaluation import instances_to_coco_json 
 
-from .evaluator import DatasetEvaluator
+from detectron2.evaluation.evaluator import DatasetEvaluator
 
 
-class F1ScoreEvaluator(DatasetEvaluator):
+class ConnectivenessEvaluator(DatasetEvaluator):
     ''' 
     This evaluator computes the F1-score of detected images with the set of ground truths
 
@@ -178,7 +178,7 @@ class F1ScoreEvaluator(DatasetEvaluator):
             res = self._derive_coco_results(
                 coco_eval, task, class_names=self._metadata.get("thing_classes")
             )
-            self._results['f1-' + task] = res
+            self._results['cc-' + task] = res
 
 
     def _derive_coco_results(self, coco_eval, iou_type, class_names=None):
@@ -199,110 +199,106 @@ class F1ScoreEvaluator(DatasetEvaluator):
         """
 
         # Final metric
-        metrics = ["F1-all", "F1-0.5", "F1-0.75", "F1-small", "F1-medium", "F1-large"]
-
+        metrics = ["cc_all", "cc_0.5", "cc_0.75"]
+        pickle.dump(coco_eval, open('coco_eval_sem.p', 'wb'))
+        
         # Return nans if there are no predictions!
         if coco_eval is None:
             self._logger.warn("No predictions from the model!")
-            return {metric: float("nan") for metric in metrics}
+            return {metric: 0. for metric in metrics}
+            
+        # get ious with dt
+        import copy
+        results_coco = copy.deepcopy(coco_eval.cocoDt)
+        # for k in results_coco.anns:
+        #     results_coco.anns[k]['category_id'] = 1
+        self_coco_eval = COCOeval(results_coco, results_coco)
+        self_coco_eval.evaluate()
         
-        prc_dict = defaultdict(list)
-        rec_dict = defaultdict(list)
-        # Calculate precision recall for each class, area, and iou threshold
-        for evalImg in coco_eval.evalImgs:
-            # Skip if maxDets is not the best value, or if evalImg is None (there was no detection)
+        dt_iou_submat = defaultdict(list)
+        for evalImg in self_coco_eval.evalImgs:
+            # Skip if maxDets is not the best value, or if evalImg is None (there was no detection), or if area is not all
             if evalImg is None:
                 continue
-            if evalImg['maxDet'] != coco_eval.params.maxDets[-1]:
+            if evalImg['maxDet'] != self_coco_eval.params.maxDets[-1]:
                 continue
-            # Extract detected and ground truths
-            # int, [a1, a2], [TxD], [TxD], [G], [G]
-            cate_class, area, dt, dtIg, gtIds, gtIg = [evalImg[x] for x in ['category_id', 'aRng', 'dtMatches', 'dtIgnore', 'gtIds', 'gtIgnore']]
-            # [TxG]
-            gtm = evalImg['gtMatches']
-            gtm = (gtm > 0)
-            # get area
-            area = tuple(area)
-            # Get iou thresholds too 
-            thrs = coco_eval.params.iouThrs
-            # Total number of predictions
+            if evalImg['aRng'][0] != 0 or evalImg['aRng'][1] != 10000000000.:
+                continue
+            cate_class, area, dt, dtIg, dtScores, dtIds, gtIds, gtIg, ious = [evalImg[x] for x in ['category_id', 'aRng', 'dtMatches', 'dtIgnore', 'dtScores', 'dtIds', 'gtIds', 'gtIgnore', 'ious']]
             num_gt = len(gtIds) - np.sum(gtIg)
-            T, D = dt.shape
-            #if D == 0 or num_gt == 0:
             if num_gt == 0:
                 continue
-                # both dt and gt cannot be 0
-                # No predictions, F1-score is 0
-                for i in range(T):
-                    prc_dict[(cate_class, i, area)].append(0)
-                    rec_dict[(cate_class, i, area)].append(0)
-                continue
+            dt_iou_submat[evalImg['image_id']].append({'category_id': cate_class, 'dtIds': dtIds, 'gtIds': gtIds, 'dtScores': dtScores, 'ious': ious})
+                
+        counting_confusion = []
+        from tqdm import tqdm
+        for img_idx in tqdm(dt_iou_submat):
+            counting_confusion.append([])
+            scores = [dis['dtScores'] for dis in dt_iou_submat[img_idx]]
+            self_ious = [dis['ious'] for dis in dt_iou_submat[img_idx]]
             
-            # There are some detections, see if there are matches and they are not ignored
-            # Compute total true positives and false positives for the image (for each threshold)
-            # Size of tp, fp = [T,]
-            tp = np.logical_and(                dt , np.logical_not(dtIg) ).sum(1) * 1.0
-            fp = np.logical_and( np.logical_not(dt), np.logical_not(dtIg) ).sum(1) * 1.0
-            fn = np.logical_and( np.logical_not(gtm), np.logical_not(gtIg)[np.newaxis, :]).sum(1) * 1.0
-            for i in range(T):
-                prc_dict[(cate_class, i, area)].append(tp[i] / (tp[i] + fp[i] + np.spacing(1)))
-                rec_dict[(cate_class, i, area)].append(tp[i] / (num_gt + np.spacing(1)))
-                # tp[i] + fn[i]
-
-        # Initialize f1-scores 
-        f1_scores = defaultdict(list)
-        area_to_key = [(tuple(area), st) for area, st in zip(coco_eval.params.areaRng,  \
-                                ['all', 'small', 'medium', 'large'])]
-        area_to_key = dict(area_to_key)
-
-        # Calculated the precision and recall for all these images, now calculate the F1-score averaged
-        # over each of these parameters
-        for key in prc_dict.keys():
-            cate_cls, iou_thr, area = key
-            areakey = area_to_key[area]
-            pr = np.array(prc_dict[key])
-            rc = np.array(rec_dict[key])
-            assert len(pr) == len(rc)
-            f1 = 2*pr*rc/(pr + rc + np.spacing(1)) 
-            if len(f1) == 0:
-                continue
-            f1_scores[(iou_thr, areakey)].append(f1.mean())
+            for iou_thresh in list(np.linspace(0.05, 0.95, 10)) + [0.5]:
+                class_confusions = []
+                for class_idx in range(len(scores)):
+                    connections = scores[class_idx] * (self_ious[class_idx] > iou_thresh)
+                    connections = np.minimum(connections, connections.T)
+                    
+                    old_connections = np.zeros_like(connections)
+                    while np.abs(connections - old_connections).sum() > 0.1:
+                        old_connections = connections
+                        stacked_conns = np.tile(connections, [len(connections), 1, 1])
+                        connections = np.minimum(stacked_conns, stacked_conns.T).max(1)
+                    
+                    confusions = [_calc_counting_confusion(scores[class_idx], connections, ct) for ct in np.linspace(0.05, 0.95, 10)]
+                    class_confusions.append(confusions)
+                class_confusions = np.array(class_confusions).sum(0)
+                class_confusions[:, 1] = np.maximum(class_confusions[:, 1], np.ones(len(class_confusions)))
+                counting_confusion[-1].append((class_confusions[:, 0] / class_confusions[:, 1]).mean())
         
-        # Compute average F1score for given iou threshold and area
-        for key, val in f1_scores.items():
-            f1_scores[key] = np.mean(val)
+        counting_confusion = np.array(counting_confusion)
+        F = 1000
+        cc_50 = np.around(F * counting_confusion[:, -1].mean(), 2)
+        cc_75 = np.around(F * counting_confusion[:, 7].mean(), 2)
+        cc_all = np.around(F * counting_confusion[:, :-1].mean(), 2)
+        results = {'cc_all': cc_all, 'cc_0.5': cc_50, 'cc_0.75': cc_75}
+        # results = {'cc_0.5': cc_50}
         
-        # Calculate individual f1-scores
-        results = {
-            'all': [],
-            '0.5': [],
-            '0.75': [],
-            'small': [],   # small, med, large f1 at all thresholds
-            'medium': [],
-            'large':[]
-        }
-        for key, f1_mean in f1_scores.items():
-            iou_thr, areakey = key
-            results[areakey].append(f1_mean)
-            if areakey == 'all':
-                iou_thr = coco_eval.params.iouThrs[iou_thr]
-                if str(iou_thr) in ['0.5', '0.75']:
-                    results[str(iou_thr)].append(f1_mean)
-
-        # Average these quantities
-        for k, v in results.items():
-            results[k] = np.around(np.mean(v), 4)
-
-        # Final dict of results
-        results = {f'F1_{k}': v for k, v in results.items()}
         self._logger.info(
-            "Evaluation results for {}: \n".format('F1-score') + create_small_table(results)
+            "Evaluation results for {}: \n".format('Counting Confusion') + create_small_table(results)
         )
-        if not np.isfinite(sum(results.values())):
-            self._logger.info("Some metrics cannot be computed and is shown as NaN.")
-
+        print(results)
+        
         return results
-
+    
+def _calc_counting_confusion(scores, connectivity, conf_thresh):
+    valid_preds = np.arange(len(scores))[scores > conf_thresh]
+    error = np.zeros((len(valid_preds), len(valid_preds)))
+    n_valid = len(valid_preds)
+    for i in range(n_valid):
+        for j in range(n_valid):
+            if i == j:
+                continue
+            x, y = valid_preds[i], valid_preds[j]
+            error[i, j] = scores[y] / scores[x] * connectivity[x, y]
+    return error.sum(), n_valid
+           
+# def _propogate_connectivity(connectivity, eps=0.1):
+#     # step through the graph by one step
+#     new_connectivity = connectivity.copy()
+#     n = len(connectivity)
+#     for i in range(n):
+#         for j in range(i + 1, n):
+#             for k in range(j + 1, n):
+#                 new_connectivity[i, k] = max(min(connectivity[i, j], connectivity[j, k]), new_connectivity[i, k])
+#                 new_connectivity[k, i] = new_connectivity[i, k]
+#                 new_connectivity[i, j] = max(min(connectivity[i, k], connectivity[k, j]), new_connectivity[i, j])
+#                 new_connectivity[j, i] = new_connectivity[i, j]
+#                 new_connectivity[j, k] = max(min(connectivity[j, i], connectivity[i, k]), new_connectivity[j, k])
+#                 new_connectivity[k, j] = new_connectivity[j, k]
+#     if np.abs(new_connectivity - connectivity).sum() < eps:
+#         return new_connectivity
+#     else:
+#         return _propogate_connectivity(new_connectivity, eps)
 
 
 def _evaluate_predictions_on_coco(coco_gt, coco_results, iou_type, kpt_oks_sigmas=None):
